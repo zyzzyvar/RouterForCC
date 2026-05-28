@@ -2,16 +2,19 @@
  * 阶段⑥：校验。
  *
  * 三种校验路径：
- *   1. rules：长度、必含/必避词、结尾标点等
- *   2. schema：当 task.constraints.output_format == 'json' 且提供 inputs.schema 时，
- *              用 zod 解析（要求 inputs.schema 也是 zod-shaped object），
- *              简化版：尝试 JSON.parse，失败即不通过
+ *   1. rules：必含/必避、非空 / 极短判断
+ *   2. schema：output_format == 'json' 时尝试 JSON.parse
  *   3. llm_judge：调用 Claude 做结构性裁判（当前为占位）
  *
  * 选择策略：
  *   - output_format=json → schema 验证 + 规则
- *   - 复核类任务/risk_level=high → llm_judge（先返回 passed=true 的桩，避免阻塞）
+ *   - 复核类任务/risk_level=high → llm_judge（占位返回 passed=true）
  *   - 其它 → rules
+ *
+ * 历史：原本有"实际输出 < 预期 20% 视为可疑"的硬阈值，但 heuristic analyzer
+ *      估算 vs 实际差距经常很大（让模型"写一段代码"可能估 1500 但实际 80 token
+ *      也是合理回答）。改为只在真正空 / 几乎为空时失败；长度异常作为软信号但
+ *      不阻断 pipeline。
  */
 import type { TaskSpec, ValidatorType } from "./types.js";
 
@@ -26,6 +29,8 @@ export interface ValidationOutcome {
   failure_reasons: string[];
   confidence: number;
 }
+
+const MIN_ABS_TOKENS = 3; // 少于这么多就视为空回答（保护性下限）
 
 export function validate(args: ValidateArgs): ValidationOutcome {
   const { task, raw_output } = args;
@@ -62,32 +67,42 @@ function validateJson(task: TaskSpec, raw: string): ValidationOutcome {
 function validateRules(task: TaskSpec, raw: string): ValidationOutcome {
   const failures: string[] = [];
   const text = raw;
+  const actualTokens = estimateTokens(text);
 
-  // 长度下限：估计输出 < 20% 视为可疑
-  const expected = task.analyzed?.estimated_output_tokens ?? 0;
-  if (expected > 0 && estimateTokens(text) < expected * 0.2) {
-    failures.push(`output too short (got ~${estimateTokens(text)} tokens, expected ~${expected})`);
+  // 1. 几乎为空 = 模型拒答或调用层 bug
+  if (actualTokens < MIN_ABS_TOKENS) {
+    failures.push(`output is empty or near-empty (~${actualTokens} tokens)`);
   }
 
-  // 必含
+  // 2. 必含
   for (const must of task.constraints.must_include) {
     if (!text.includes(must)) failures.push(`missing required content: "${must}"`);
   }
-  // 必避
+  // 3. 必避
   for (const avoid of task.constraints.must_avoid) {
     if (text.includes(avoid)) failures.push(`contains forbidden content: "${avoid}"`);
   }
 
+  // 4. 软信号：远短于预期，记入 reasons 但不让通过失败
+  //    （只在 estimateTokens >= MIN_ABS_TOKENS 且远低于估计时记录）
+  const expected = task.analyzed?.estimated_output_tokens ?? 0;
+  const passed = failures.length === 0;
+  const softReasons: string[] = [];
+  if (passed && expected > 0 && actualTokens < expected * 0.2) {
+    softReasons.push(
+      `note: output much shorter than estimated (~${actualTokens} vs ~${expected} tokens)`,
+    );
+  }
+
   return {
-    passed: failures.length === 0,
+    passed,
     validator_type: "rules",
-    failure_reasons: failures,
+    failure_reasons: passed ? softReasons : failures,
     confidence: 0.8,
   };
 }
 
 function llmJudgeStub(_raw: string): ValidationOutcome {
-  // 占位：未来这里调用 Claude 做 LLM-as-judge
   return {
     passed: true,
     validator_type: "llm_judge",

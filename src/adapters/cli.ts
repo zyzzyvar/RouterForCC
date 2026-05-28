@@ -288,9 +288,22 @@ export function buildCli(): Command {
         registry.upsert({ ...m, calibration: undefined });
       }
       const providers = new MockProviderRegistry({
-        text: "// mock response\nfunction quicksort(a){return a;}",
+        text: [
+          "// [smoke mock] — 这是 MockProvider 返回的伪造回答，证明 pipeline 端到端跑通。",
+          "// 真实场景里，这里会是你 vLLM 生成的 quicksort 实现。",
+          "function quicksort(arr) {",
+          "  if (arr.length <= 1) return arr.slice();",
+          "  const pivot = arr[0];",
+          "  const left = [];",
+          "  const right = [];",
+          "  for (let i = 1; i < arr.length; i++) {",
+          "    if (arr[i] < pivot) left.push(arr[i]); else right.push(arr[i]);",
+          "  }",
+          "  return [...quicksort(left), pivot, ...quicksort(right)];",
+          "}",
+        ].join("\n"),
         tokens_in: 200,
-        tokens_out: 80,
+        tokens_out: 120,
       });
       const pipeline = new Pipeline({
         registry,
@@ -335,4 +348,26 @@ async function readAllStdin(): Promise<string> {
 }
 
 // Suppress unused warning for NULL_LOGGER import; kept for future use.
+void NULL_LOGGER;
+ EXIT_FAILED;
+      } else {
+        process.stderr.write("OK — pipeline ran end-to-end with mock provider.\n");
+      }
+    });
+
+  return program;
+}
+
+// ----------------------------------------------------------------
+// helpers
+// ----------------------------------------------------------------
+async function readAllStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(chunk as Buffer);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+// keep NULL_LOGGER import alive for future use
 void NULL_LOGGER;
