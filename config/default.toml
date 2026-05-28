@@ -1,0 +1,45 @@
+# Router 默认配置
+# 用户配置：~/.config/router/config.toml（会与本文件合并，用户文件优先）
+
+[server]
+host = "127.0.0.1"
+http_port = 7878
+mcp_port = 7879
+
+[storage]
+# 数据目录；支持 ~ 与环境变量
+data_dir = "~/.local/share/router"
+# raw_output 大文件存到 data_dir/outputs/
+outputs_subdir = "outputs"
+# SQLite 文件
+db_filename = "router.db"
+
+[claude]
+# Claude（主脑）使用的模型；analyzer/decider/judge 都用它
+model = "claude-sonnet-4-6"
+# API key 引用名（在 keystore 里查找）
+auth_ref = "claude_api_key"
+max_tokens = 4096
+timeout_ms = 60000
+
+[router]
+# 阶段④挂起触发阈值
+cost_ceiling_default_usd = 0.10
+# 分数差小于此值时触发 "low confidence" 挂起
+confidence_gap_threshold = 0.3
+# pending_approval 状态过期时间（小时）
+continuation_token_ttl_hours = 24
+
+[calibration]
+# 校准 decay 参数：total_count 多少次后初始分数权重折半左右
+decay_half_life = 50
+
+[logging]
+level = "info"            # trace | debug | info | warn | error
+pretty = false             # 开发可设 true
+
+[secrets]
+# 密钥后端：auto | keytar | file
+backend = "auto"
+# 文件后备的路径（仅 file/auto 时用）
+file_path = "~/.config/router/secrets.age"
