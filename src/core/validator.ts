@@ -2,7 +2,7 @@
  * 阶段⑥：校验。
  *
  * 三种校验路径：
- *   1. rules：必含/必避、非空 / 极短判断
+ *   1. rules：必含/必避、真空判断
  *   2. schema：output_format == 'json' 时尝试 JSON.parse
  *   3. llm_judge：调用 Claude 做结构性裁判（当前为占位）
  *
@@ -11,10 +11,11 @@
  *   - 复核类任务/risk_level=high → llm_judge（占位返回 passed=true）
  *   - 其它 → rules
  *
- * 历史：原本有"实际输出 < 预期 20% 视为可疑"的硬阈值，但 heuristic analyzer
- *      估算 vs 实际差距经常很大（让模型"写一段代码"可能估 1500 但实际 80 token
- *      也是合理回答）。改为只在真正空 / 几乎为空时失败；长度异常作为软信号但
- *      不阻断 pipeline。
+ * 历史教训：
+ *   - 原本"实际输出 < 预期 20% 视为可疑"过严，heuristic 估算 vs 实际差距常很大
+ *   - 之后改成 MIN_ABS_TOKENS=3，但 estimateTokens 对 CJK 严重低估
+ *     ("你好世界" 4 字符 ÷ 3 ≈ 2 tokens < 3 → 误判失败)
+ *   - 现在改用 raw.trim().length === 0 直接判真空；token 估算只用作软信号
  */
 import type { TaskSpec, ValidatorType } from "./types.js";
 
@@ -29,8 +30,6 @@ export interface ValidationOutcome {
   failure_reasons: string[];
   confidence: number;
 }
-
-const MIN_ABS_TOKENS = 3; // 少于这么多就视为空回答（保护性下限）
 
 export function validate(args: ValidateArgs): ValidationOutcome {
   const { task, raw_output } = args;
@@ -67,11 +66,10 @@ function validateJson(task: TaskSpec, raw: string): ValidationOutcome {
 function validateRules(task: TaskSpec, raw: string): ValidationOutcome {
   const failures: string[] = [];
   const text = raw;
-  const actualTokens = estimateTokens(text);
 
-  // 1. 几乎为空 = 模型拒答或调用层 bug
-  if (actualTokens < MIN_ABS_TOKENS) {
-    failures.push(`output is empty or near-empty (~${actualTokens} tokens)`);
+  // 1. 真空 = 模型拒答 / 调用层 bug；只看 trim 后是否空，避免对短回答误伤
+  if (text.trim().length === 0) {
+    failures.push("output is empty");
   }
 
   // 2. 必含
@@ -83,12 +81,12 @@ function validateRules(task: TaskSpec, raw: string): ValidationOutcome {
     if (text.includes(avoid)) failures.push(`contains forbidden content: "${avoid}"`);
   }
 
-  // 4. 软信号：远短于预期，记入 reasons 但不让通过失败
-  //    （只在 estimateTokens >= MIN_ABS_TOKENS 且远低于估计时记录）
+  // 4. 软信号：远短于预期，记入 reasons 但 passed=true
   const expected = task.analyzed?.estimated_output_tokens ?? 0;
   const passed = failures.length === 0;
+  const actualTokens = estimateTokens(text);
   const softReasons: string[] = [];
-  if (passed && expected > 0 && actualTokens < expected * 0.2) {
+  if (passed && expected > 0 && actualTokens > 0 && actualTokens < expected * 0.2) {
     softReasons.push(
       `note: output much shorter than estimated (~${actualTokens} vs ~${expected} tokens)`,
     );
@@ -111,6 +109,30 @@ function llmJudgeStub(_raw: string): ValidationOutcome {
   };
 }
 
+/**
+ * 估算 token 数，区分 CJK 与 ASCII：
+ *   - CJK 字符（汉字 / 假名 / 韩文 / 全角符号）：~1 token / char
+ *   - 其它（ASCII 单词、空格、英文标点）：~1 token / 3 chars
+ * 这是 GPT/Claude 系 tokenizer 的粗略经验值；只用于估算，不要求精确。
+ */
 function estimateTokens(s: string): number {
-  return Math.ceil(s.length / 3);
+  let cjk = 0;
+  let other = 0;
+  // Array.from 按 code point 遍历，正确处理 surrogate pair
+  for (const ch of Array.from(s)) {
+    const cp = ch.codePointAt(0) ?? 0;
+    // 主要 CJK 范围：汉字、假名、韩文、全角符号、半宽假名
+    if (
+      (cp >= 0x4e00 && cp <= 0x9fff) || // CJK Unified Ideographs
+      (cp >= 0x3000 && cp <= 0x30ff) || // CJK Symbols, Hiragana, Katakana
+      (cp >= 0xac00 && cp <= 0xd7af) || // Hangul Syllables
+      (cp >= 0xff00 && cp <= 0xffef) || // Halfwidth/Fullwidth Forms
+      (cp >= 0x20000 && cp <= 0x2ffff) // CJK Extensions B+
+    ) {
+      cjk++;
+    } else {
+      other++;
+    }
+  }
+  return cjk + Math.ceil(other / 3);
 }
