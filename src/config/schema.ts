@@ -62,4 +62,3 @@ export const ConfigSchema = z
 export type Config = z.infer<typeof ConfigSchema>;
 
 export const DEFAULT_CONFIG: Config = ConfigSchema.parse({});
-FAULT_CONFIG: Config = ConfigSchema.parse({});
