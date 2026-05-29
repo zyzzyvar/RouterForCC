@@ -140,6 +140,8 @@ export const LocalAttributesSchema = z.object({
   quantization: z.enum(["fp16", "bf16", "int8", "int4", "awq", "gptq", "none"]),
   throughput_tokens_per_sec: z.number().int().positive(),
   max_concurrent_requests: z.number().int().positive(),
+  /** 当本地端点要求 Bearer auth 时（如 vLLM --api-key），指向 secret 引用名 */
+  auth_ref: z.string().optional(),
 });
 export type LocalAttributes = z.infer<typeof LocalAttributesSchema>;
 

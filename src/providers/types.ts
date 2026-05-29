@@ -58,10 +58,20 @@ export class DefaultProviderRegistry implements ProviderRegistry {
       }
       // vllm / tgi / llamacpp 暴露 OpenAI 兼容
       if (!model.local) throw new Error(`Local model ${model.id} missing local attributes`);
+      // 若本地端点声明了 auth_ref（如 vLLM --api-key），从 SecretsStore 拿
+      let localKey: string | undefined;
+      if (model.local.auth_ref) {
+        try {
+          localKey = this.cfg.secrets.get(model.local.auth_ref);
+        } catch {
+          // 没拿到也继续：local 没设 key 是正常情况
+          localKey = undefined;
+        }
+      }
       return new OpenAICompatProvider({
         endpoint: model.local.endpoint,
         model_id_in_request: model.id,
-        api_key: undefined, // 本地通常不需要
+        api_key: localKey,
         pricing: null,
       });
     }

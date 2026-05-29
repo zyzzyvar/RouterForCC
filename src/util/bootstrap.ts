@@ -55,10 +55,11 @@ export async function bootstrap(config: Config): Promise<AppContext> {
     file_path: config.secrets.file_path,
   });
 
-  // 预加载 keytar
+  // 预加载 keytar：hosted 与 local 模型可能都有 auth_ref
   const refs = new Set<string>([config.claude.auth_ref]);
   for (const m of registry.listActiveFull()) {
     if (m.deployment_type === "hosted" && m.hosted?.auth_ref) refs.add(m.hosted.auth_ref);
+    if (m.deployment_type === "local" && m.local?.auth_ref) refs.add(m.local.auth_ref);
   }
   await preloadKeytar(config.secrets.service, [...refs]);
 

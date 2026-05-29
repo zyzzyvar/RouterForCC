@@ -235,6 +235,8 @@ export function buildVllmModelFromEnv(): ModelEntryInput | null {
       quantization: "fp16",
       throughput_tokens_per_sec: 60,
       max_concurrent_requests: 8,
+      // 如果设了 VLLM_API_KEY env，让 SecretsStore 用 "vllm_api_key" ref 拿到（env backend 大小写规则）
+      auth_ref: process.env.VLLM_API_KEY ? "vllm_api_key" : undefined,
     },
     compliance: {
       can_process_pii: true,
