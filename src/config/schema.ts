@@ -53,6 +53,7 @@ export const ConfigSchema = z
       .object({
         level: z.enum(["trace", "debug", "info", "warn", "error"]).default("info"),
         pretty: z.boolean().default(false),
+        to_stderr: z.boolean().default(false),
       })
       .default({}),
   })
@@ -61,3 +62,4 @@ export const ConfigSchema = z
 export type Config = z.infer<typeof ConfigSchema>;
 
 export const DEFAULT_CONFIG: Config = ConfigSchema.parse({});
+FAULT_CONFIG: Config = ConfigSchema.parse({});

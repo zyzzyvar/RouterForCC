@@ -1,7 +1,7 @@
 /**
  * 统一日志接口。用 pino —— 结构化 JSON，性能好，支持 child logger。
  *
- * Logger interface 是 pino 的子集，方便后续替换 / mock。
+ * to_stderr=true 时把日志写到 fd=2，避免污染 stdio MCP 协议的 stdout。
  */
 import pino, { type Logger as PinoLogger, type LoggerOptions } from "pino";
 
@@ -16,7 +16,8 @@ export interface Logger {
 
 export interface LoggerConfig {
   level: "trace" | "debug" | "info" | "warn" | "error";
-  pretty?: boolean; // 终端友好（仅开发用）
+  pretty?: boolean;
+  to_stderr?: boolean;
 }
 
 export function createLogger(cfg: LoggerConfig): Logger {
@@ -24,10 +25,16 @@ export function createLogger(cfg: LoggerConfig): Logger {
   if (cfg.pretty) {
     opts.transport = {
       target: "pino-pretty",
-      options: { colorize: true, translateTime: "HH:MM:ss.l" },
+      options: {
+        colorize: true,
+        translateTime: "HH:MM:ss.l",
+        destination: cfg.to_stderr ? 2 : 1,
+      },
     };
+    return wrap(pino(opts));
   }
-  return wrap(pino(opts));
+  const dest = pino.destination(cfg.to_stderr ? 2 : 1);
+  return wrap(pino(opts, dest));
 }
 
 function wrap(p: PinoLogger): Logger {

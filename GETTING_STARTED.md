@@ -112,28 +112,59 @@ Use `--format json` if you need the full envelope (rationale, chosen model, etc)
 
 Claude Code 看到这个 CLAUDE.md 后会自己学会什么时候调用。
 
-### 方式 B：当 MCP 工具用（更结构化，Claude Code 看得到工具定义）
+### 方式 B：作为 stdio MCP server（**推荐**，Claude Code 原生支持）
+
+不需要常驻服务，Claude Code 自己 spawn 一个 `router mcp-stdio` 子进程跑 MCP 协议。
 
 ```bash
-npx tsx src/index.ts serve --mcp
-# MCP-over-HTTP listening on 127.0.0.1:7879
+# 一行注册（前提：router 已 link 到 PATH）
+claude mcp add router router mcp-stdio
+
+# 看一下是否注册成功
+claude mcp list
 ```
 
-在 Claude Code 的 MCP 配置里加：
+或者手动编辑 `~/.claude.json` / `~/.config/claude/settings.json`：
 
 ```json
 {
   "mcpServers": {
     "router": {
-      "url": "http://127.0.0.1:7879"
+      "command": "router",
+      "args": ["mcp-stdio"]
     }
   }
 }
 ```
 
-Claude Code 会自动发现 5 个工具：`delegate_subtask` / `confirm_subtask` / `get_task` / `list_models` / `submit_feedback`。
+下次启动 Claude Code，5 个工具会自动出现：
+- `delegate_subtask` — 主用，把任务外包给路由器
+- `confirm_subtask` — 批准挂起态任务
+- `get_task` — 查任务状态
+- `list_models` — 列出可用模型
+- `submit_feedback` — 提交反馈触发校准
 
-两种方式都能用；A 路径简单适合快速接入，B 路径让 Claude Code "看得见"工具，更适合长期使用。
+Claude Code 的 `/mcp` 命令里能看到这个 server，可以直接 enable/disable 整个 server。**而 `router disable` 命令是更细粒度的 kill-switch**：MCP server 仍然注册着，但所有工具调用立即返回 `isError: true`（提示用户跑 `router enable`），Claude Code 看到 isError 会自动回退到自己做。两层开关组合使用。
+
+### 方式 C：HTTP MCP（多个客户端共享同一个 router 进程）
+
+```bash
+router serve --mcp        # 默认 127.0.0.1:7879
+```
+
+```json
+{ "mcpServers": { "router": { "url": "http://127.0.0.1:7879" } } }
+```
+
+适合多个工具/agent 同时调用一个 router 实例的场景。
+
+### 选哪个？
+
+| 用法 | 推荐 |
+|---|---|
+| 单人 / 单个 Claude Code 实例 | **方式 B（stdio）** —— 零配置，open/close 干净 |
+| 多个 agent 共享 | 方式 C（HTTP） |
+| 不喜欢 MCP 想保持简单 | 方式 A（shell 命令 + CLAUDE.md） |
 
 ## `router run` CLI 速查
 
