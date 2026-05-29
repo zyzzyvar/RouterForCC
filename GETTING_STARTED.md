@@ -72,11 +72,15 @@ npx tsx src/index.ts run "..." --format json
 把 `router` 装到 PATH 上：
 
 ```bash
-cd router
-npm run build           # 生成 dist/index.js
-sudo ln -s "$PWD/dist/index.js" /usr/local/bin/router
-sudo chmod +x dist/index.js     # 已有 shebang? 没有就 prepend "#!/usr/bin/env node"
+cd RouterForCC
+chmod +x bin/router
+sudo ln -sf "$PWD/bin/router" /usr/local/bin/router
+
+# 验证
+router run "请翻译: hello world" --lang zh
 ```
+
+`bin/router` 是个 shell wrapper，会自动定位项目目录、用 `tsx` 跑 `src/index.ts`，**不需要 `npm run build`**。改了源码立即生效。如果有 `dist/index.js` 且比源码新，会优先用 `node` 跑（冷启动更快）。
 
 然后在 Claude Code 会话里随时：
 
