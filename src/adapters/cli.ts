@@ -1,28 +1,19 @@
 /**
  * CLI adapter (commander).
  *
- * 命令分两类：
- *
  * A. 给"人"看的（开发/排错）
  *    router serve [--http] [--mcp]
  *    router models list | add <file> | remove <id>
  *    router tasks get <task_id>
- *    router delegate <description>             // 输出完整 JSON envelope
+ *    router delegate <description>     // 完整 JSON envelope
  *    router seed-fixtures [--vllm-only]
  *    router smoke
  *
  * B. 给"程序"看的（Claude Code / 其它 agent 当 subprocess 调用）
  *    router run "task description"
- *      默认：stdout 只输出模型生成的纯文本；stderr 静默；exit 0 成功 / 1 失败 / 2 挂起 / 3 用法错
- *      --format json           完整 envelope
- *      --stdin                 从 stdin 读 task 描述（描述参数可省）
- *      --lang zh|en|...
- *      --cost-ceiling <usd>
- *      --caller-id <id>        默认 "claude-code"
- *      --idempotency <key>     避免重复执行
- *      --verbose               允许 stderr 日志（默认静默）
+ *      默认：stdout 只输出模型回答；stderr 静默；exit 0=success / 1=fail / 2=pending / 3=usage
+ *      --format json | --stdin | --lang | --cost-ceiling | --caller-id | --idempotency | --verbose
  *    router approve <continuation_token>
- *      对 pending_approval 任务继续执行；stdout 同 run。
  */
 import { Command } from "commander";
 import { readFileSync } from "node:fs";
@@ -34,16 +25,12 @@ import { serveMcp } from "./mcp.js";
 import { buildSampleModels, buildVllmModelFromEnv } from "../util/fixtures.js";
 import { openDatabase } from "../persistence/db.js";
 import { TaskStore } from "../persistence/tasks.js";
-import {
-  ExecutionStore,
-  PendingApprovalStore,
-} from "../persistence/executions.js";
+import { ExecutionStore, PendingApprovalStore } from "../persistence/executions.js";
 import { ModelRegistry } from "../registry/store.js";
 import { Pipeline } from "../core/pipeline.js";
-import { createLogger, NULL_LOGGER } from "../logging/logger.js";
+import { createLogger } from "../logging/logger.js";
 import { MockProviderRegistry } from "../util/mockProvider.js";
 
-// 退出码：被 Claude Code 等 agent 用来识别状态
 const EXIT_OK = 0;
 const EXIT_FAILED = 1;
 const EXIT_PENDING_APPROVAL = 2;
@@ -55,9 +42,7 @@ export function buildCli(): Command {
     .description("Controllable execution router: pick model, run subtask, validate.")
     .version("0.1.0");
 
-  // ============================================================================
   // serve
-  // ============================================================================
   program
     .command("serve")
     .description("Start service (HTTP and/or MCP-over-HTTP).")
@@ -78,9 +63,7 @@ export function buildCli(): Command {
       }
     });
 
-  // ============================================================================
-  // models / tasks（管理）
-  // ============================================================================
+  // models
   const models = program.command("models").description("Manage model registry");
   models.command("list").action(async () => {
     const ctx = await bootstrap(loadConfig());
@@ -101,6 +84,7 @@ export function buildCli(): Command {
     process.stdout.write(`removed: ${id}\n`);
   });
 
+  // tasks
   program
     .command("tasks")
     .command("get <task_id>")
@@ -109,9 +93,7 @@ export function buildCli(): Command {
       process.stdout.write(JSON.stringify(ctx.tasks.get(task_id), null, 2) + "\n");
     });
 
-  // ============================================================================
-  // delegate —— 给人看：完整 JSON envelope
-  // ============================================================================
+  // delegate (full JSON envelope)
   program
     .command("delegate <description>")
     .option("--lang <lang>", "zh|en|auto|mixed")
@@ -136,9 +118,7 @@ export function buildCli(): Command {
       },
     );
 
-  // ============================================================================
-  // run —— 给程序看：subprocess 友好
-  // ============================================================================
+  // run (subprocess-friendly)
   program
     .command("run [description]")
     .description(
@@ -172,14 +152,9 @@ export function buildCli(): Command {
           process.exit(EXIT_USAGE);
         }
 
-        // 静默日志：默认 subprocess 模式下不让 stderr 被 pino 信息噪音污染
         const cfg = loadConfig();
         if (!opts.verbose) cfg.logging.level = "error";
         const ctx = await bootstrap(cfg);
-        if (!opts.verbose) {
-          // bootstrap 拿到的 logger 可能已经写了一些 info；用 NULL 替换 pipeline 内部 logger
-          // 这里我们没法事后改 deps，简单做：靠 cfg.logging.level=error 已经过滤大部分
-        }
 
         const input = DelegateInputSchema.parse({
           description: desc,
@@ -196,7 +171,6 @@ export function buildCli(): Command {
         if (opts.format === "json") {
           process.stdout.write(JSON.stringify(result, null, 2) + "\n");
         } else {
-          // text 模式：只输出模型的回答；其它信息走 stderr（按 verbose）
           if (opts.verbose) {
             process.stderr.write(
               `[router] chosen=${result.proposal?.chosen_model_id ?? "-"} status=${result.status}\n`,
@@ -216,13 +190,13 @@ export function buildCli(): Command {
               ? EXIT_PENDING_APPROVAL
               : EXIT_FAILED;
         if (code === EXIT_PENDING_APPROVAL && opts.format !== "json") {
-          // 文本模式下 token 也要 stdout 输出，让调用方能拿到
           process.stdout.write(`\n[continuation_token=${result.continuation_token}]\n`);
         }
         process.exit(code);
       },
     );
 
+  // approve
   program
     .command("approve <continuation_token>")
     .description("Resume a pending-approval task")
@@ -238,9 +212,7 @@ export function buildCli(): Command {
       process.exit(result.status === "executed" ? EXIT_OK : EXIT_FAILED);
     });
 
-  // ============================================================================
-  // seed-fixtures / smoke
-  // ============================================================================
+  // seed-fixtures
   program
     .command("seed-fixtures")
     .description(
@@ -269,14 +241,11 @@ export function buildCli(): Command {
       }
     });
 
+  // smoke
   program
     .command("smoke")
     .description("Offline smoke test: in-memory DB + MockProvider, no API keys needed.")
-    .option(
-      "--task <desc>",
-      "task description to delegate",
-      "请写一个 quicksort 函数。",
-    )
+    .option("--task <desc>", "task description", "请写一个 quicksort 函数。")
     .action(async (opts: { task: string }) => {
       const logger = createLogger({ level: "info", pretty: true });
       const db = openDatabase({ filepath: ":memory:" });
@@ -287,21 +256,22 @@ export function buildCli(): Command {
       for (const m of buildSampleModels()) {
         registry.upsert({ ...m, calibration: undefined });
       }
+      const mockText = [
+        "// [smoke mock] — pipeline 端到端跑通的伪造回答。",
+        "// 真实场景里这里会是你 vLLM 生成的 quicksort 实现。",
+        "function quicksort(arr) {",
+        "  if (arr.length <= 1) return arr.slice();",
+        "  const pivot = arr[0];",
+        "  const left = [];",
+        "  const right = [];",
+        "  for (let i = 1; i < arr.length; i++) {",
+        "    if (arr[i] < pivot) left.push(arr[i]); else right.push(arr[i]);",
+        "  }",
+        "  return [...quicksort(left), pivot, ...quicksort(right)];",
+        "}",
+      ].join("\n");
       const providers = new MockProviderRegistry({
-        text: [
-          "// [smoke mock] — 这是 MockProvider 返回的伪造回答，证明 pipeline 端到端跑通。",
-          "// 真实场景里，这里会是你 vLLM 生成的 quicksort 实现。",
-          "function quicksort(arr) {",
-          "  if (arr.length <= 1) return arr.slice();",
-          "  const pivot = arr[0];",
-          "  const left = [];",
-          "  const right = [];",
-          "  for (let i = 1; i < arr.length; i++) {",
-          "    if (arr[i] < pivot) left.push(arr[i]); else right.push(arr[i]);",
-          "  }",
-          "  return [...quicksort(left), pivot, ...quicksort(right)];",
-          "}",
-        ].join("\n"),
+        text: mockText,
         tokens_in: 200,
         tokens_out: 120,
       });
@@ -336,9 +306,6 @@ export function buildCli(): Command {
   return program;
 }
 
-// ----------------------------------------------------------------
-// 辅助
-// ----------------------------------------------------------------
 async function readAllStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) {
@@ -346,28 +313,3 @@ async function readAllStdin(): Promise<string> {
   }
   return Buffer.concat(chunks).toString("utf8");
 }
-
-// Suppress unused warning for NULL_LOGGER import; kept for future use.
-void NULL_LOGGER;
- EXIT_FAILED;
-      } else {
-        process.stderr.write("OK — pipeline ran end-to-end with mock provider.\n");
-      }
-    });
-
-  return program;
-}
-
-// ----------------------------------------------------------------
-// helpers
-// ----------------------------------------------------------------
-async function readAllStdin(): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) {
-    chunks.push(chunk as Buffer);
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
-
-// keep NULL_LOGGER import alive for future use
-void NULL_LOGGER;
