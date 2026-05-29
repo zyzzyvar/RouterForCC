@@ -116,6 +116,8 @@ Claude Code 看到这个 CLAUDE.md 后会自己学会什么时候调用。
 
 不需要常驻服务，Claude Code 自己 spawn 一个 `router mcp-stdio` 子进程跑 MCP 协议。
 
+**走 MCP 时不用动 CLAUDE.md** —— router 在 `initialize` 时通过 MCP 协议的 `instructions` 字段把"何时调用、如何读响应"的契约直接推给 Claude Code，Claude 会自动把它当作系统上下文。策略（什么时候外包、什么时候本地做）住在 router 的 analyzer + decider + 权重表里，不在提示词里。
+
 ```bash
 # 一行注册（前提：router 已 link 到 PATH）
 claude mcp add router router mcp-stdio

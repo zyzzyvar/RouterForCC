@@ -146,10 +146,62 @@ function buildTools(): Array<ToolDef<unknown>> {
   ];
 }
 
+/**
+ * 给 client LLM 看的"使用手册"。
+ * MCP initialize 响应里以 instructions 字段送给客户端 —— Claude Code 会把它
+ * 当作可用工具的系统上下文，所以你不需要再在 CLAUDE.md 里写一遍。
+ *
+ * 原则：不要硬编码"什么场景该外包"——那是 router 内部 analyzer/decider 的事。
+ * 这里只解释响应契约，让 client 知道怎么读返回值。
+ */
+const SERVER_INSTRUCTIONS = `Router MCP server.
+
+This server delegates subtasks to whichever LLM the router judges best. It has
+its own analyzer, capability-scoring, and approval logic — so as a client,
+default to calling \`delegate_subtask\` for tasks and let the router decide.
+
+Response semantics for \`delegate_subtask\`:
+
+- \`status: "executed"\` — Use \`result\` as the subtask's output. Optionally
+  surface \`proposal.chosen_model_id\` and a short version of
+  \`proposal.rationale\` so the user can see who did it.
+
+- \`status: "pending_approval"\` — The router thinks this needs a second look.
+  Common reasons: \`high_risk_task\`, \`cost_over_threshold\`,
+  \`low_confidence_decision\`. Show the user \`proposal.rationale\` +
+  \`approval_reasons\`, then either call \`confirm_subtask\` with
+  \`continuation_token\` to proceed, or drop the task.
+
+- \`status: "failed"\` — Router or model failed. Read \`error.message\`; either
+  retry with refined constraints (e.g. tighter \`cost_ceiling_usd\`,
+  \`excluded_models\`) or do the work yourself.
+
+- Tool response \`isError: true\` with text "Router is disabled" — the user
+  globally turned off router. Do the task yourself; do not retry.
+
+Avoid second-guessing the router based on surface features like task length or
+language. Its analyzer already sees those. The places to tune behavior are:
+- \`hints.cost_ceiling_usd\` — lower it to force approval gate on expensive routes
+- \`hints.preferred_models\` / \`excluded_models\` — soft / hard model preference
+- \`hints.sensitivity_level\` / \`hints.risk_level\` — explicit override of analyzer
+
+When NOT to call delegate_subtask: when you're in the middle of a conversation
+and re-transmitting the context through the tool boundary would lose more than
+the routing saves.
+
+Other tools:
+- \`confirm_subtask\` — resume a pending-approval task
+- \`get_task\` — inspect a task by id
+- \`list_models\` — show registered models
+- \`submit_feedback\` — log user satisfaction; triggers calibration`;
+
 export function buildMcpServer(ctx: AppContext): Server {
   const server = new Server(
     { name: "router", version: "0.1.0" },
-    { capabilities: { tools: {} } },
+    {
+      capabilities: { tools: {} },
+      instructions: SERVER_INSTRUCTIONS,
+    },
   );
   const tools = buildTools();
 
