@@ -64,7 +64,10 @@ export class Pipeline {
   /**
    * 完整入口：分析 → 决策 →（必要时挂起 approval）→ 执行 → 校验 → 校准。
    */
-  async runDelegate(input: DelegateInput): Promise<DelegateResult> {
+  async runDelegate(
+    input: DelegateInput,
+    overrides?: { analyzerLlm?: ClaudeClient },
+  ): Promise<DelegateResult> {
     const log = this.deps.logger.child({ caller_id: input.caller_id });
 
     // 幂等
@@ -76,7 +79,7 @@ export class Pipeline {
       }
     }
 
-    const task = await this.analyzeAndPersist(input);
+    const task = await this.analyzeAndPersist(input, overrides?.analyzerLlm);
     log.info({ task_id: task.task_id, type: task.analyzed?.task_type }, "task analyzed");
 
     // 候选模型池
@@ -162,7 +165,10 @@ export class Pipeline {
   // 内部
   // ----------------------------------------------------------------
 
-  private async analyzeAndPersist(input: DelegateInput): Promise<TaskSpec> {
+  private async analyzeAndPersist(
+    input: DelegateInput,
+    analyzerLlmOverride?: ClaudeClient,
+  ): Promise<TaskSpec> {
     const now = new Date().toISOString();
     const draft: TaskSpec = TaskSpecSchema.parse({
       task_id: ulid(),
@@ -204,7 +210,7 @@ export class Pipeline {
         inputs: draft.inputs,
         hints: draft.hints,
       },
-      { claude: this.deps.claude },
+      { claude: analyzerLlmOverride ?? this.deps.claude },
     );
     return this.deps.tasks.update({ ...draft, analyzed, status: "analyzing" });
   }

@@ -28,16 +28,26 @@ import { DelegateInputSchema, UserFeedbackSchema } from "../core/schemas.js";
 import type { AppContext } from "../util/bootstrap.js";
 import { createServer } from "node:http";
 import { readState } from "../util/state.js";
+import { McpSamplingAnalyzerClient, type ClaudeClient } from "../claude/client.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyJSONSchema = Record<string, any>;
+
+interface ToolSessionCtx {
+  /** 当前 MCP server，可用来调 sampling */
+  server: Server;
+  /** 是否检测到 client 端声明了 sampling capability */
+  client_supports_sampling: boolean;
+  /** AppContext 上的 logger child */
+  app: AppContext;
+}
 
 interface ToolDef<I> {
   name: string;
   description: string;
   inputSchema: AnyJSONSchema;
   parser: z.ZodType<I>;
-  handler: (input: I, ctx: AppContext) => Promise<unknown>;
+  handler: (input: I, session: ToolSessionCtx) => Promise<unknown>;
 }
 
 function buildTools(): Array<ToolDef<unknown>> {
@@ -76,7 +86,18 @@ function buildTools(): Array<ToolDef<unknown>> {
         required: ["description"],
       },
       parser: DelegateInputSchema,
-      handler: async (input, ctx) => ctx.pipeline.runDelegate(input as never),
+      handler: async (input, session) => {
+        // 在 MCP 模式且 client 支持 sampling 时，让 analyzer 反向请求 client（即 Claude Code）
+        // 用它的 Claude 跑推理。否则用 bootstrap 里默认的 analyzer LLM（可能是 vLLM 或 heuristic）。
+        let analyzerLlm: ClaudeClient | undefined;
+        if (session.client_supports_sampling) {
+          analyzerLlm = new McpSamplingAnalyzerClient(session.server);
+        }
+        return session.app.pipeline.runDelegate(
+          input as never,
+          analyzerLlm ? { analyzerLlm } : undefined,
+        );
+      },
     } as ToolDef<unknown>,
     {
       name: "confirm_subtask",
@@ -87,8 +108,10 @@ function buildTools(): Array<ToolDef<unknown>> {
         required: ["continuation_token"],
       },
       parser: z.object({ continuation_token: z.string() }),
-      handler: async (input, ctx) =>
-        ctx.pipeline.confirmAndExecute((input as { continuation_token: string }).continuation_token),
+      handler: async (input, session) =>
+        session.app.pipeline.confirmAndExecute(
+          (input as { continuation_token: string }).continuation_token,
+        ),
     },
     {
       name: "get_task",
@@ -99,7 +122,8 @@ function buildTools(): Array<ToolDef<unknown>> {
         required: ["task_id"],
       },
       parser: z.object({ task_id: z.string() }),
-      handler: async (input, ctx) => ctx.tasks.get((input as { task_id: string }).task_id),
+      handler: async (input, session) =>
+        session.app.tasks.get((input as { task_id: string }).task_id),
     },
     {
       name: "list_models",
@@ -113,8 +137,8 @@ function buildTools(): Array<ToolDef<unknown>> {
       parser: z.object({
         status: z.enum(["active", "deprecated", "experimental"]).optional(),
       }),
-      handler: async (input, ctx) =>
-        ctx.registry.list({
+      handler: async (input, session) =>
+        session.app.registry.list({
           status: (input as { status?: "active" | "deprecated" | "experimental" }).status,
         }),
     },
@@ -138,9 +162,9 @@ function buildTools(): Array<ToolDef<unknown>> {
         required: ["record_id", "feedback"],
       },
       parser: z.object({ record_id: z.string(), feedback: UserFeedbackSchema }),
-      handler: async (input, ctx) => {
+      handler: async (input, session) => {
         const i = input as { record_id: string; feedback: z.infer<typeof UserFeedbackSchema> };
-        return ctx.pipeline.submitFeedback(i.record_id, i.feedback);
+        return session.app.pipeline.submitFeedback(i.record_id, i.feedback);
       },
     },
   ];
@@ -236,8 +260,19 @@ export function buildMcpServer(ctx: AppContext): Server {
       };
     }
     try {
+      // 检测 client 是否声明了 sampling capability
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const caps = (server as any).getClientCapabilities?.();
+      const client_supports_sampling = !!caps && caps.sampling !== undefined;
+
+      const session: ToolSessionCtx = {
+        server,
+        client_supports_sampling,
+        app: ctx,
+      };
+
       const args = tool.parser.parse(req.params.arguments ?? {});
-      const result = await tool.handler(args, ctx);
+      const result = await tool.handler(args, session);
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
       };
@@ -289,6 +324,49 @@ export async function serveMcpStdio(ctx: AppContext): Promise<() => Promise<void
   const transport = new StdioServerTransport();
   await server.connect(transport);
   return async () => {
+    await server.close();
+  };
+}
+// HTTP transport
+// ----------------------------------------------------------------
+export interface ServeMcpHttpOptions {
+  port: number;
+  bind: string;
+  ctx: AppContext;
+}
+
+export async function serveMcp(opts: ServeMcpHttpOptions): Promise<() => Promise<void>> {
+  const server = buildMcpServer(opts.ctx);
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => crypto.randomUUID(),
+  });
+  await server.connect(transport);
+
+  const http = createServer((req, res) => {
+    transport.handleRequest(req, res).catch((e) => {
+      opts.ctx.logger.error({ err: (e as Error).message }, "mcp http transport error");
+    });
+  });
+  http.listen(opts.port, opts.bind);
+
+  return async () => {
+    await new Promise<void>((resolve) => http.close(() => resolve()));
+    await server.close();
+  };
+}
+
+// ----------------------------------------------------------------
+// Stdio transport（给 Claude Code 这类原生 MCP client 用）
+// ----------------------------------------------------------------
+export async function serveMcpStdio(ctx: AppContext): Promise<() => Promise<void>> {
+  const server = buildMcpServer(ctx);
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  return async () => {
+    await server.close();
+  };
+}
+ return async () => {
     await server.close();
   };
 }

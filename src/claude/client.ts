@@ -98,3 +98,69 @@ function trimEnd(s: string, ch: string): string {
   while (s.endsWith(ch)) s = s.slice(0, -1);
   return s;
 }
+
+// ============================================================================
+// MCP Sampling 版（client 用自己的 Claude 帮 server 跑推理）
+// ============================================================================
+//
+// 适用场景：router 作为 MCP server，无法 / 不想直连 Anthropic API；但 MCP
+// client 端（Claude Code）已经登录了 Claude。通过 sampling/createMessage 反向
+// 请求 client 跑一次 LLM 推理。Server 不持有 API key，token 走 client 订阅。
+//
+// 前提：MCP client 在 initialize 时声明了 capabilities.sampling。否则该实现
+// 会抛错，由 analyzer.ts 的 try-catch 自动降级到 heuristic fallback。
+
+// 用 any 包一下 Server，避免依赖 SDK 内部细节 / 不同版本 API 变化
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyMcpServer = any;
+
+export interface McpSamplingConfig {
+  /**
+   * 给 client 看的偏好（client 决定用哪个模型）。
+   * 默认偏好 intelligence > cost > speed，因为 analyzer 输出 JSON，准确比速度重要。
+   */
+  model_preferences?: {
+    intelligence_priority?: number;
+    speed_priority?: number;
+    cost_priority?: number;
+  };
+}
+
+export class McpSamplingAnalyzerClient implements ClaudeClient {
+  constructor(
+    private server: AnyMcpServer,
+    private cfg: McpSamplingConfig = {},
+  ) {}
+
+  async complete(args: ClaudeCompleteArgs): Promise<string> {
+    const pref = this.cfg.model_preferences;
+    const result = await this.server.createMessage({
+      messages: [
+        {
+          role: "user",
+          content: { type: "text", text: args.user },
+        },
+      ],
+      systemPrompt: args.system || undefined,
+      maxTokens: args.max_tokens ?? 1024,
+      temperature: args.temperature ?? 0,
+      modelPreferences: {
+        intelligencePriority: pref?.intelligence_priority ?? 0.8,
+        speedPriority: pref?.speed_priority ?? 0.3,
+        costPriority: pref?.cost_priority ?? 0.4,
+      },
+      // 不要求 client 用任何特定模型 hint
+    });
+
+    // result.content 一般是 { type: "text", text: "..." }
+    if (result && typeof result === "object") {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const content = (result as any).content;
+      if (content && typeof content === "object") {
+        if (content.type === "text" && typeof content.text === "string") return content.text;
+        if (typeof content.text === "string") return content.text;
+      }
+    }
+    return "";
+  }
+}
