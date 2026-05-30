@@ -2,19 +2,11 @@
  * MCP adapter.
  *
  * 同一个 buildMcpServer 注册 5 个工具，两种 transport 共用：
- *   - serveMcp      → StreamableHTTPServerTransport（HTTP-based MCP）
- *   - serveMcpStdio → StdioServerTransport（Claude Code 原生集成走这条）
+ *   - serveMcp      → StreamableHTTPServerTransport
+ *   - serveMcpStdio → StdioServerTransport（Claude Code 走这条）
  *
- * 工具集合：
- *   - delegate_subtask    把任务交给路由器选模型 → 执行 → 校验
- *   - confirm_subtask     批准挂起态任务继续执行
- *   - get_task            查询任务状态
- *   - list_models         列出注册模型
- *   - submit_feedback     提交反馈，触发校准
- *
- * 关键点：
- *   - 所有工具调用都先查 enable/disable 开关；disabled 时返回 isError 并提示用户
- *   - stdio 模式时 logger 写 stderr，避免污染 MCP JSON-RPC 协议
+ * - 工具调用前查 enable/disable
+ * - delegate_subtask 在 client 支持 sampling 时让 analyzer 反向走 client 的 Claude
  */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -34,11 +26,8 @@ import { McpSamplingAnalyzerClient, type ClaudeClient } from "../claude/client.j
 type AnyJSONSchema = Record<string, any>;
 
 interface ToolSessionCtx {
-  /** 当前 MCP server，可用来调 sampling */
   server: Server;
-  /** 是否检测到 client 端声明了 sampling capability */
   client_supports_sampling: boolean;
-  /** AppContext 上的 logger child */
   app: AppContext;
 }
 
@@ -55,7 +44,7 @@ function buildTools(): Array<ToolDef<unknown>> {
     {
       name: "delegate_subtask",
       description:
-        "Delegate a subtask to the routed LLM (usually a local vLLM). Use this for: long Chinese writing/translation, boilerplate code, summaries, or mechanical tasks that don't need your own reasoning. The router analyzes the task, picks the best model, executes, and validates the output. Returns chosen model id, rationale, and the model's result text.",
+        "Delegate a subtask to the routed LLM. The router analyzes the task, picks the best model, executes, and validates. Returns chosen model, rationale, and result text.",
       inputSchema: {
         type: "object",
         properties: {
@@ -64,10 +53,7 @@ function buildTools(): Array<ToolDef<unknown>> {
             type: "object",
             properties: {
               language: { type: "string", enum: ["zh", "en", "auto", "mixed"] },
-              output_format: {
-                type: "string",
-                enum: ["text", "markdown", "json", "code"],
-              },
+              output_format: { type: "string", enum: ["text", "markdown", "json", "code"] },
               must_include: { type: "array", items: { type: "string" } },
               must_avoid: { type: "array", items: { type: "string" } },
             },
@@ -87,8 +73,6 @@ function buildTools(): Array<ToolDef<unknown>> {
       },
       parser: DelegateInputSchema,
       handler: async (input, session) => {
-        // 在 MCP 模式且 client 支持 sampling 时，让 analyzer 反向请求 client（即 Claude Code）
-        // 用它的 Claude 跑推理。否则用 bootstrap 里默认的 analyzer LLM（可能是 vLLM 或 heuristic）。
         let analyzerLlm: ClaudeClient | undefined;
         if (session.client_supports_sampling) {
           analyzerLlm = new McpSamplingAnalyzerClient(session.server);
@@ -170,54 +154,35 @@ function buildTools(): Array<ToolDef<unknown>> {
   ];
 }
 
-/**
- * 给 client LLM 看的"使用手册"。
- * MCP initialize 响应里以 instructions 字段送给客户端 —— Claude Code 会把它
- * 当作可用工具的系统上下文，所以你不需要再在 CLAUDE.md 里写一遍。
- *
- * 原则：不要硬编码"什么场景该外包"——那是 router 内部 analyzer/decider 的事。
- * 这里只解释响应契约，让 client 知道怎么读返回值。
- */
 const SERVER_INSTRUCTIONS = `Router MCP server.
 
-This server delegates subtasks to whichever LLM the router judges best. It has
-its own analyzer, capability-scoring, and approval logic — so as a client,
-default to calling \`delegate_subtask\` for tasks and let the router decide.
+This server delegates subtasks to whichever LLM the router judges best. Default
+to calling delegate_subtask for tasks and let the router decide.
 
-Response semantics for \`delegate_subtask\`:
+Response semantics for delegate_subtask:
 
-- \`status: "executed"\` — Use \`result\` as the subtask's output. Optionally
-  surface \`proposal.chosen_model_id\` and a short version of
-  \`proposal.rationale\` so the user can see who did it.
+- status: "executed" — Use result as output. Optionally surface
+  proposal.chosen_model_id and a short proposal.rationale.
 
-- \`status: "pending_approval"\` — The router thinks this needs a second look.
-  Common reasons: \`high_risk_task\`, \`cost_over_threshold\`,
-  \`low_confidence_decision\`. Show the user \`proposal.rationale\` +
-  \`approval_reasons\`, then either call \`confirm_subtask\` with
-  \`continuation_token\` to proceed, or drop the task.
+- status: "pending_approval" — Router thinks this needs a second look. Common
+  reasons: high_risk_task, cost_over_threshold, low_confidence_decision. Show
+  user proposal.rationale + approval_reasons, then call confirm_subtask with
+  continuation_token to proceed, or drop the task.
 
-- \`status: "failed"\` — Router or model failed. Read \`error.message\`; either
-  retry with refined constraints (e.g. tighter \`cost_ceiling_usd\`,
-  \`excluded_models\`) or do the work yourself.
+- status: "failed" — Router or model failed. Read error.message; retry with
+  refined constraints or do the work yourself.
 
-- Tool response \`isError: true\` with text "Router is disabled" — the user
-  globally turned off router. Do the task yourself; do not retry.
+- Tool response isError: true with "Router is disabled" — Do the task yourself;
+  do not retry.
 
 Avoid second-guessing the router based on surface features like task length or
-language. Its analyzer already sees those. The places to tune behavior are:
-- \`hints.cost_ceiling_usd\` — lower it to force approval gate on expensive routes
-- \`hints.preferred_models\` / \`excluded_models\` — soft / hard model preference
-- \`hints.sensitivity_level\` / \`hints.risk_level\` — explicit override of analyzer
+language. Tune behavior via hints (cost_ceiling_usd / preferred_models /
+excluded_models / sensitivity_level / risk_level).
 
-When NOT to call delegate_subtask: when you're in the middle of a conversation
-and re-transmitting the context through the tool boundary would lose more than
-the routing saves.
+When NOT to call delegate_subtask: when you're mid-conversation with established
+context that would be expensive to re-transmit through the tool boundary.
 
-Other tools:
-- \`confirm_subtask\` — resume a pending-approval task
-- \`get_task\` — inspect a task by id
-- \`list_models\` — show registered models
-- \`submit_feedback\` — log user satisfaction; triggers calibration`;
+Other tools: confirm_subtask, get_task, list_models, submit_feedback.`;
 
 export function buildMcpServer(ctx: AppContext): Server {
   const server = new Server(
@@ -238,7 +203,6 @@ export function buildMcpServer(ctx: AppContext): Server {
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    // 全局开关：disabled 时所有 tool 调用直接返回 isError，让 caller 自己 fallback
     const state = readState();
     if (!state.enabled) {
       return {
@@ -260,17 +224,14 @@ export function buildMcpServer(ctx: AppContext): Server {
       };
     }
     try {
-      // 检测 client 是否声明了 sampling capability
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const caps = (server as any).getClientCapabilities?.();
       const client_supports_sampling = !!caps && caps.sampling !== undefined;
-
       const session: ToolSessionCtx = {
         server,
         client_supports_sampling,
         app: ctx,
       };
-
       const args = tool.parser.parse(req.params.arguments ?? {});
       const result = await tool.handler(args, session);
       return {
@@ -287,9 +248,6 @@ export function buildMcpServer(ctx: AppContext): Server {
   return server;
 }
 
-// ----------------------------------------------------------------
-// HTTP transport
-// ----------------------------------------------------------------
 export interface ServeMcpHttpOptions {
   port: number;
   bind: string;
@@ -316,57 +274,11 @@ export async function serveMcp(opts: ServeMcpHttpOptions): Promise<() => Promise
   };
 }
 
-// ----------------------------------------------------------------
-// Stdio transport（给 Claude Code 这类原生 MCP client 用）
-// ----------------------------------------------------------------
 export async function serveMcpStdio(ctx: AppContext): Promise<() => Promise<void>> {
   const server = buildMcpServer(ctx);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   return async () => {
-    await server.close();
-  };
-}
-// HTTP transport
-// ----------------------------------------------------------------
-export interface ServeMcpHttpOptions {
-  port: number;
-  bind: string;
-  ctx: AppContext;
-}
-
-export async function serveMcp(opts: ServeMcpHttpOptions): Promise<() => Promise<void>> {
-  const server = buildMcpServer(opts.ctx);
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => crypto.randomUUID(),
-  });
-  await server.connect(transport);
-
-  const http = createServer((req, res) => {
-    transport.handleRequest(req, res).catch((e) => {
-      opts.ctx.logger.error({ err: (e as Error).message }, "mcp http transport error");
-    });
-  });
-  http.listen(opts.port, opts.bind);
-
-  return async () => {
-    await new Promise<void>((resolve) => http.close(() => resolve()));
-    await server.close();
-  };
-}
-
-// ----------------------------------------------------------------
-// Stdio transport（给 Claude Code 这类原生 MCP client 用）
-// ----------------------------------------------------------------
-export async function serveMcpStdio(ctx: AppContext): Promise<() => Promise<void>> {
-  const server = buildMcpServer(ctx);
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  return async () => {
-    await server.close();
-  };
-}
- return async () => {
     await server.close();
   };
 }
