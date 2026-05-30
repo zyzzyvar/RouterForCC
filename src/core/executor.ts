@@ -44,18 +44,31 @@ export async function execute(args: ExecuteArgs): Promise<ExecuteOutcome> {
   const started_at = new Date().toISOString();
   const t0 = Date.now();
 
+  // max_tokens 计算：地板 2048（reasoning 模型需要给推理预留预算，否则可能整个吃光后返回空）
+  // 顶板 model.max_output_tokens（但每次重试翻倍，给空响应留余地）
+  const MIN_BUDGET = 2048;
+  const baseBudget = Math.max(
+    MIN_BUDGET,
+    proposal.estimated_cost.tokens_out * 2 + 256,
+  );
+
   for (let attempt = 1; attempt <= max_attempts; attempt++) {
     try {
       if (attempt > 1) await sleep(backoffs[attempt - 1] ?? 0);
+      const budget = Math.min(
+        model.max_output_tokens,
+        baseBudget * attempt, // 每次重试翻倍预算
+      );
       const r = await provider.invoke({
         model_id: model.id,
         system: proposal.prompt.system,
         user: proposal.prompt.user,
-        max_output_tokens: Math.min(
-          model.max_output_tokens,
-          proposal.estimated_cost.tokens_out * 2 + 256,
-        ),
+        max_output_tokens: budget,
       });
+      // 空响应也算失败 —— reasoning 模型常在 max_tokens 太小时返回 200 OK + 空 content
+      if (!r.text || r.text.trim().length === 0) {
+        throw new Error(`provider returned empty content (max_tokens=${budget})`);
+      }
       const completed_at = new Date().toISOString();
       const latency_ms = Date.now() - t0;
       return {
@@ -79,6 +92,30 @@ export async function execute(args: ExecuteArgs): Promise<ExecuteOutcome> {
   }
   // 不可达
   throw new ExecuteError(`executor: exhausted retries for ${model.id}`, retry_history);
+}
+
+export class ExecuteError extends Error {
+  constructor(
+    message: string,
+    public readonly retry_history: ExecuteOutcome["retry_history"],
+  ) {
+    super(message);
+    this.name = "ExecuteError";
+  }
+}
+
+function isRetryable(err: unknown): boolean {
+  if (!(err instanceof Error)) return true;
+  const m = err.message.toLowerCase();
+  // 显式不可恢复：401/403/404 等密钥/路由错误
+  if (/(401|403|404|invalid api key|unauthorized|forbidden)/.test(m)) return false;
+  return true;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+}`, retry_history);
 }
 
 export class ExecuteError extends Error {
