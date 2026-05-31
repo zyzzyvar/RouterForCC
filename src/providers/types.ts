@@ -2,13 +2,11 @@
  * Provider 抽象：所有外包模型（hosted/local）共用一套调用接口。
  *
  * Provider.invoke() 返回的字段统一为：text / tokens_in / tokens_out / usd。
- * 不暴露各家原生 SDK 的差异。
  *
  * ProviderRegistry：按 ModelEntry 决定走哪个 provider。
- *   - hosted + endpoint 形似 OpenAI compatible → openai-compat
- *   - hosted + vendor='anthropic' → anthropic（本期不实现，预留）
- *   - local + inference_engine='ollama' → ollama（走 ollama HTTP）
- *   - local + engine in {vllm, tgi, llamacpp} → openai-compat（都暴露 v1/chat/completions）
+ *   - hosted → openai-compat（OpenAI、DeepSeek、Kimi、OpenRouter 等）
+ *   - local + ollama → ollama
+ *   - local + vllm/tgi/llamacpp → openai-compat
  */
 import type { ModelEntry } from "../core/types.js";
 
@@ -37,7 +35,7 @@ export interface ProviderRegistry {
 }
 
 // ----------------------------------------------------------------
-// 一个默认实现：根据 ModelEntry 字段选 provider
+// 默认实现：根据 ModelEntry 字段选 provider
 // ----------------------------------------------------------------
 
 import { OpenAICompatProvider } from "./openaiCompat.js";
@@ -56,7 +54,6 @@ export class DefaultProviderRegistry implements ProviderRegistry {
       if (model.local?.inference_engine === "ollama") {
         return new OllamaProvider({ endpoint: model.local.endpoint });
       }
-      // vllm / tgi / llamacpp 暴露 OpenAI 兼容
       if (!model.local) throw new Error(`Local model ${model.id} missing local attributes`);
       // 若本地端点声明了 auth_ref（如 vLLM --api-key），从 SecretsStore 拿
       let localKey: string | undefined;
@@ -64,7 +61,6 @@ export class DefaultProviderRegistry implements ProviderRegistry {
         try {
           localKey = this.cfg.secrets.get(model.local.auth_ref);
         } catch {
-          // 没拿到也继续：local 没设 key 是正常情况
           localKey = undefined;
         }
       }

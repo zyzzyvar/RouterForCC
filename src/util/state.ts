@@ -5,11 +5,6 @@
  *   - 状态存到 ~/.config/router/state.toml （单一字段 enabled = true/false）
  *   - 默认是 enabled（首次启动无文件 = enabled）
  *   - env 优先级：ROUTER_DISABLED=1 强制 off；ROUTER_ENABLED=1 强制 on
- *
- * 这样 Claude Code 可以：
- *   - 每次 session 开始前查 `router status`
- *   - 看到 `disabled` 就不调 router，自己干
- *   - 用户用 `router disable` 一行命令关闭整个体系，不重启 Claude Code 也生效
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -25,7 +20,6 @@ export interface RouterState {
 }
 
 export function readState(): RouterState {
-  // env override 最高优先级
   if (process.env.ROUTER_DISABLED === "1") {
     return { enabled: false, updated_at: new Date().toISOString(), reason: "env:ROUTER_DISABLED=1" };
   }
@@ -56,7 +50,6 @@ export function writeState(enabled: boolean, reason?: string): RouterState {
     updated_at: new Date().toISOString(),
     reason,
   };
-  // 简单 TOML 序列化（避免引入额外依赖）
   const lines: string[] = [
     `enabled = ${state.enabled}`,
     `updated_at = "${state.updated_at}"`,

@@ -77,7 +77,7 @@ export const SAMPLE_INPUTS: ModelEntryInput[] = [
     status: "active",
     deployment_type: "local",
     context_max: 131_072,
-    context_effective: 65_536, // YaRN 扩展后保守用一半
+    context_effective: 65_536,
     max_output_tokens: 8_192,
     input_modalities: ["text"],
     output_modalities: ["text"],
@@ -195,13 +195,11 @@ export function buildSampleModels(): ModelEntry[] {
 // ============================================================================
 // 用环境变量构造一条用户的 vLLM ModelEntry：
 //   VLLM_ENDPOINT      http://localhost:8000/v1
-//   VLLM_MODEL_ID      Qwen2.5-72B-Instruct  （vLLM 在 /v1/models 暴露的 id）
-//   VLLM_DISPLAY_NAME  可选；默认 = VLLM_MODEL_ID
+//   VLLM_MODEL_ID      Qwen2.5-72B-Instruct
+//   VLLM_API_KEY       可选；设了则 router 用 SecretsStore 拿
+//   VLLM_DISPLAY_NAME  可选
 //   VLLM_CONTEXT_MAX   可选；默认 131072
 //   VLLM_CONTEXT_EFF   可选；默认 65536
-//
-// 这是为了让 `router seed-fixtures` 能一行接入用户本机 vLLM，
-// 不必手写一份 JSON。
 // ============================================================================
 
 export function buildVllmModelFromEnv(): ModelEntryInput | null {
@@ -235,7 +233,6 @@ export function buildVllmModelFromEnv(): ModelEntryInput | null {
       quantization: "fp16",
       throughput_tokens_per_sec: 60,
       max_concurrent_requests: 8,
-      // 如果设了 VLLM_API_KEY env，让 SecretsStore 用 "vllm_api_key" ref 拿到（env backend 大小写规则）
       auth_ref: process.env.VLLM_API_KEY ? "vllm_api_key" : undefined,
     },
     compliance: {

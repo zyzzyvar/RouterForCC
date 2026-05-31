@@ -3,7 +3,7 @@
  *               (approval?) → execute → validate → calibrate 串成一个流。
  *
  * 三种入口：
- *   - runDelegate(input)：从 DelegateInput 开始，幂等检查 → 跑完整流程
+ *   - runDelegate(input, overrides?)：从 DelegateInput 开始，幂等检查 → 跑完整流程
  *   - confirmAndExecute(token)：从 pending_approval 恢复，执行后半段
  *   - submitFeedback(record_id, feedback)：写入用户反馈，重新跑校准
  *
@@ -14,7 +14,6 @@ import { ulid } from "ulid";
 import type {
   DelegateInput,
   DelegateResult,
-  ModelEntry,
   TaskSpec,
   Proposal,
   ApprovalDecision,
@@ -63,6 +62,8 @@ export class Pipeline {
 
   /**
    * 完整入口：分析 → 决策 →（必要时挂起 approval）→ 执行 → 校验 → 校准。
+   * overrides.analyzerLlm 用于 MCP sampling 模式 —— 给本次调用指定一个特殊的
+   * analyzer LLM（比如 client-side Claude via sampling）。
    */
   async runDelegate(
     input: DelegateInput,
@@ -82,7 +83,6 @@ export class Pipeline {
     const task = await this.analyzeAndPersist(input, overrides?.analyzerLlm);
     log.info({ task_id: task.task_id, type: task.analyzed?.task_type }, "task analyzed");
 
-    // 候选模型池
     const candidates = this.deps.registry.listActiveFull();
     if (candidates.length === 0) {
       return this.failTask(task, "no_active_models", "ModelRegistry contains no active entries");
@@ -334,7 +334,6 @@ export class Pipeline {
 
   /** 幂等命中时，根据已有 task 状态合成 DelegateResult */
   private assembleResultFromTask(task: TaskSpec): DelegateResult {
-    // 简化：直接以当前状态返回；executed 时缺 result（调用方可单独查 execution 记录）
     return {
       status:
         task.status === "executed" || task.status === "failed" || task.status === "pending_approval"
@@ -347,6 +346,4 @@ export class Pipeline {
   }
 }
 
-// 工具：仅在没有 calibration 时给路由一个合理 weights。
-// 路由器评分本来就走 resolveWeights，这里只是导出方便 adapter 在 debug 时复用。
 export { resolveWeights };

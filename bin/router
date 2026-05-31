@@ -1,21 +1,17 @@
 #!/usr/bin/env bash
 # router CLI wrapper.
 #
-# 这个脚本会：
-#   1. 解析自己的实际位置（支持 symlink）
-#   2. 用 tsx 执行 src/index.ts，把所有参数透传
+# 默认行为：永远用 tsx 跑 src/index.ts（dev 安全，改源码立即生效）
+# 想跑编译版：ROUTER_USE_DIST=1 router ...  （前提你 npm run build 过）
 #
-# 优点：不需要 npm run build；改了源码立即生效。
-# 安装：把项目里 bin/router 链到 /usr/local/bin/router 即可：
-#   ln -sf "$(pwd)/bin/router" /usr/local/bin/router
+# 安装：ln -sf "$(pwd)/bin/router" /usr/local/bin/router
 set -euo pipefail
 
-# 解析 $0：处理多层 symlink（macOS 默认 readlink 不支持 -f，所以手写）
+# 解析 $0 经过的 symlink
 SOURCE="${BASH_SOURCE[0]:-$0}"
 while [ -L "$SOURCE" ]; do
   DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
   SOURCE="$(readlink "$SOURCE")"
-  # 相对路径还原
   case "$SOURCE" in
     /*) ;;
      *) SOURCE="$DIR/$SOURCE" ;;
@@ -24,15 +20,14 @@ done
 BIN_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
 REPO_DIR="$(cd -P "$BIN_DIR/.." >/dev/null 2>&1 && pwd)"
 
-# 检查 src/index.ts 存在
 if [ ! -f "$REPO_DIR/src/index.ts" ]; then
   echo "router: cannot find src/index.ts in $REPO_DIR" >&2
   exit 3
 fi
 
-# 如果有 dist 且不旧，可以用 node 直接跑（更快冷启动），否则 fallback tsx
-if [ -f "$REPO_DIR/dist/index.js" ] && [ "$REPO_DIR/dist/index.js" -nt "$REPO_DIR/src/index.ts" ]; then
+# 显式 opt-in 跑 dist；默认永远走 tsx，避免 stale dist 坑
+if [ "${ROUTER_USE_DIST:-0}" = "1" ] && [ -f "$REPO_DIR/dist/index.js" ]; then
   exec node "$REPO_DIR/dist/index.js" "$@"
-else
-  exec npx --prefix "$REPO_DIR" tsx "$REPO_DIR/src/index.ts" "$@"
 fi
+
+exec npx --prefix "$REPO_DIR" tsx "$REPO_DIR/src/index.ts" "$@"

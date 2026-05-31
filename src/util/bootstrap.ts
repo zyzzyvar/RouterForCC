@@ -3,12 +3,9 @@
  * 装配起来。
  *
  * Analyzer LLM 的挑选优先级（高到低）：
- *   1. env ANALYZER_VLLM_ENDPOINT + ANALYZER_VLLM_MODEL_ID
- *      → 用本机/任意 OpenAI 兼容端点作 analyzer
- *   2. config.claude.auth_ref 在 secrets 里存在 → 用 Claude
- *   3. 都没有 → undefined，analyzer 自动走启发式 fallback
- *
- * 这让"在 Claude 不可达"的环境里仍能拿到高质量 task 分析。
+ *   1. env ANALYZER_VLLM_ENDPOINT + ANALYZER_VLLM_MODEL_ID → OpenAI 兼容 endpoint
+ *   2. config.claude.auth_ref 在 secrets 里存在 → Claude
+ *   3. 都没有 → undefined，analyzer 走启发式 fallback
  */
 import { type Config } from "../config/schema.js";
 import { openDatabase } from "../persistence/db.js";
@@ -34,9 +31,7 @@ export interface AppContext {
   pending: PendingApprovalStore;
   pipeline: Pipeline;
   secrets: SecretsStore;
-  /** 实际拿到的 analyzer LLM（可能是 Claude 或 OpenAICompat） */
   analyzer_llm?: ClaudeClient;
-  /** 它来自哪里 —— 便于日志/排错 */
   analyzer_llm_source?: "vllm" | "claude" | "heuristic";
 }
 
@@ -55,7 +50,6 @@ export async function bootstrap(config: Config): Promise<AppContext> {
     file_path: config.secrets.file_path,
   });
 
-  // 预加载 keytar：hosted 与 local 模型可能都有 auth_ref
   const refs = new Set<string>([config.claude.auth_ref]);
   for (const m of registry.listActiveFull()) {
     if (m.deployment_type === "hosted" && m.hosted?.auth_ref) refs.add(m.hosted.auth_ref);
@@ -63,7 +57,6 @@ export async function bootstrap(config: Config): Promise<AppContext> {
   }
   await preloadKeytar(config.secrets.service, [...refs]);
 
-  // 选 analyzer LLM
   const { client: analyzer_llm, source: analyzer_llm_source } = pickAnalyzerLlm(
     config,
     secrets,
@@ -107,7 +100,6 @@ function pickAnalyzerLlm(
   secrets: SecretsStore,
   logger: Logger,
 ): { client?: ClaudeClient; source: "vllm" | "claude" | "heuristic" } {
-  // 1. env: ANALYZER_VLLM_ENDPOINT
   const vllmEndpoint = process.env.ANALYZER_VLLM_ENDPOINT;
   const vllmModel = process.env.ANALYZER_VLLM_MODEL_ID;
   if (vllmEndpoint && vllmModel) {
@@ -125,7 +117,6 @@ function pickAnalyzerLlm(
     };
   }
 
-  // 2. Claude key
   try {
     const key = secrets.get(config.claude.auth_ref);
     logger.info({ model: config.claude.model }, "analyzer using Claude");
@@ -140,6 +131,5 @@ function pickAnalyzerLlm(
     );
   }
 
-  // 3. heuristic
   return { source: "heuristic" };
 }
